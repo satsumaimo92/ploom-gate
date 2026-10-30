@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#111214">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta http-equiv="Cache-Control" content="no-cache">
 <title>Ploom Gate</title>
 <style>
   :root {
@@ -23,7 +24,9 @@
     padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
   }
   main { max-width: 440px; margin: 0 auto; display: grid; gap: 14px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; }
   h1 { font-size: 15px; font-weight: 600; color: var(--sub); margin: 4px 0 0; letter-spacing: .04em; }
+  #ver { font-size: 11px; color: var(--sub); }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; }
   .state { text-align: center; padding: 28px 18px; }
   .state .label { font-size: 13px; color: var(--sub); }
@@ -31,26 +34,34 @@
   .state .note { font-size: 13px; color: var(--sub); min-height: 1.4em; }
   .ready .big { color: var(--ok); }
   .waiting .big { color: var(--wait); }
+  .smoking .big { color: var(--accent); }
   button {
     width: 100%; border: 0; border-radius: 14px; padding: 18px; font-size: 18px; font-weight: 700;
     background: var(--accent); color: #fff; cursor: pointer;
   }
   button:disabled { opacity: .35; cursor: not-allowed; }
   button.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); font-size: 15px; padding: 14px; }
+  button.link { background: none; border: 0; color: var(--sub); font-size: 12px; font-weight: 400; padding: 4px 0; width: auto; text-decoration: underline; }
   .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  #device { font-size: 13px; color: var(--sub); line-height: 1.6; }
+  #device { font-size: 13px; color: var(--sub); line-height: 1.7; }
   #device b { color: var(--text); font-weight: 600; }
   .log { font-size: 13px; line-height: 1.8; font-variant-numeric: tabular-nums; max-height: 220px; overflow: auto; }
   .log div { display: flex; justify-content: space-between; border-bottom: 1px solid var(--line); }
   .muted { color: var(--sub); }
+  .cardhead { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--sub); margin-bottom: 6px; }
   label.setting { display: flex; align-items: center; justify-content: space-between; font-size: 14px; }
   label.setting input { width: 80px; font-size: 16px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); text-align: right; }
-  #msg { font-size: 13px; color: var(--danger); min-height: 1.2em; text-align: center; }
+  #msg { font-size: 14px; min-height: 1.3em; text-align: center; line-height: 1.5; }
+  #msg.err { color: var(--danger); }
+  #msg.ok { color: var(--ok); }
+  #msg.info { color: var(--sub); }
+  details { font-size: 12px; color: var(--sub); }
+  details pre { white-space: pre-wrap; word-break: break-all; font-size: 11px; max-height: 200px; overflow: auto; margin: 8px 0 0; }
 </style>
 </head>
 <body>
 <main>
-  <h1>PLOOM GATE</h1>
+  <header><h1>PLOOM GATE</h1><span id="ver">v3</span></header>
 
   <section class="card state" id="stateCard">
     <div class="label" id="stateLabel">—</div>
@@ -72,17 +83,22 @@
   </section>
 
   <section class="card">
-    <div class="muted" style="font-size:13px;margin-bottom:10px">本体のロック機能（最初に一度だけ）</div>
+    <div class="cardhead"><span>解錠ログ</span><button class="link" id="undoBtn">最新を取り消す</button></div>
+    <div class="log" id="log"></div>
+  </section>
+
+  <section class="card">
+    <div class="cardhead"><span>本体のロック機能</span></div>
     <div class="row">
       <button class="secondary" id="funcOnBtn">ONにする</button>
       <button class="secondary" id="funcOffBtn">OFFにする</button>
     </div>
   </section>
 
-  <section class="card">
-    <div class="muted" style="font-size:13px;margin-bottom:6px">解錠ログ</div>
-    <div class="log" id="log"></div>
-  </section>
+  <details class="card">
+    <summary>通信ログ（調査用）</summary>
+    <pre id="debug"></pre>
+  </details>
 </main>
 
 <script>
@@ -97,102 +113,108 @@ const CMD = {
   lockFuncOn: [12, 0xa0, 1, 1, 2, 3, 1, 2, 3, 0, 0, 0, 0],
   lockFuncOff: [12, 0xa0, 0, 1, 2, 3, 1, 2, 3, 0, 0, 0, 0],
 };
+// lockingStatus: 0=ロック機能OFF / 1=解錠中 / 17=ロック中
+const LOCKED = 17, UNLOCKED = 1, FUNC_OFF = 0;
+const SESSION_MAX_MS = 15 * 60000; // 吸い終わりを検知できなくても15分で閉める
 const STORE = "ploomGate.v1";
 
-// 状態はこの端末のブラウザにだけ保存する（消えても致命的ではない）
 function load() {
   try { return JSON.parse(localStorage.getItem(STORE)) || {}; } catch { return {}; }
 }
-function save(s) {
-  try { localStorage.setItem(STORE, JSON.stringify(s)); } catch {}
+function save() {
+  try { localStorage.setItem(STORE, JSON.stringify(st)); } catch {}
 }
 let st = Object.assign({ intervalMin: 60, log: [] }, load());
 
-let device = null, writeChar = null;
 const $ = (id) => document.getElementById(id);
+let device = null, writeChar = null, busy = false;
+let devInfo = {};               // { status, locking }
+let session = null;             // 解錠中のセッション { start, sawSmoking, timer }
+const waiters = new Set();
 
-function lastUnlock() { return st.log.length ? st.log[st.log.length - 1] : null; }
-function nextAllowed() {
-  const last = lastUnlock();
-  return last ? last + st.intervalMin * 60000 : 0;
-}
+// ---------- 表示 ----------
 function fmtTime(t) {
   return new Date(t).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 function fmtLeft(ms) {
-  const s = Math.ceil(ms / 1000), m = Math.floor(s / 60), r = s % 60;
+  const s = Math.max(0, Math.ceil(ms / 1000)), m = Math.floor(s / 60), r = s % 60;
   return `${m}:${String(r).padStart(2, "0")}`;
 }
-function msg(t) { $("msg").textContent = t || ""; }
+function msg(text, kind = "err") { $("msg").textContent = text || ""; $("msg").className = kind; }
+function dbg(line) {
+  const el = $("debug");
+  el.textContent = `${new Date().toLocaleTimeString("ja-JP")} ${line}\n` + el.textContent.slice(0, 4000);
+}
+const connected = () => !!(device && device.gatt.connected);
+const lastUnlock = () => st.log.length ? st.log[st.log.length - 1] : null;
+const nextAllowed = () => lastUnlock() ? lastUnlock() + st.intervalMin * 60000 : 0;
+const lockText = (v) => v === LOCKED ? "ロック中" : v === UNLOCKED ? "解錠中" : v === FUNC_OFF ? "ロック機能OFF" : v == null ? "—" : `不明(${v})`;
 
 function render() {
-  const left = nextAllowed() - Date.now();
   const card = $("stateCard");
-  if (left > 0) {
+  const left = nextAllowed() - Date.now();
+  if (session) {
+    card.className = "card state smoking";
+    $("stateLabel").textContent = "解錠中";
+    $("stateBig").textContent = fmtLeft(session.start + SESSION_MAX_MS - Date.now());
+    $("stateNote").textContent = "吸い終わったら自動でロックします（画面は開いたまま）";
+  } else if (left > 0) {
     card.className = "card state waiting";
     $("stateLabel").textContent = "次に吸えるまで";
     $("stateBig").textContent = fmtLeft(left);
     $("stateNote").textContent = `${fmtTime(nextAllowed())} から`;
-    $("unlockBtn").disabled = true;
   } else {
     card.className = "card state ready";
     $("stateLabel").textContent = "いま";
     $("stateBig").textContent = "OK";
-    const last = lastUnlock();
-    $("stateNote").textContent = last ? `前回 ${fmtTime(last)}` : "まだ記録なし";
-    $("unlockBtn").disabled = false;
+    $("stateNote").textContent = lastUnlock() ? `前回 ${fmtTime(lastUnlock())}` : "まだ記録なし";
   }
-  $("disconnectBtn").disabled = !(device && device.gatt.connected);
+  $("unlockBtn").disabled = busy || !!session || left > 0;
+  for (const id of ["lockBtn", "funcOnBtn", "funcOffBtn"]) $(id).disabled = busy;
+  $("disconnectBtn").disabled = busy || !connected();
+  $("undoBtn").disabled = !st.log.length;
   $("log").innerHTML = st.log.slice().reverse().slice(0, 50).map((t, i, a) => {
     const prev = a[i + 1];
     const gap = prev ? `${Math.round((t - prev) / 60000)}分後` : "";
     return `<div><span>${fmtTime(t)}</span><span class="muted">${gap}</span></div>`;
   }).join("") || '<span class="muted">なし</span>';
+  $("device").innerHTML = connected()
+    ? `<b>${device.name}</b>　接続中<br>状態: ${devInfo.status ?? "—"}　ロック: ${lockText(devInfo.locking)}`
+    : device ? `<b>${device.name}</b>　未接続` : "未接続";
 }
 
-function describe(dv) {
-  const cmd = dv.getUint8(1).toString(16).toUpperCase().padStart(2, "0");
-  if (cmd === "30" && dv.byteLength > 7) {
-    const status = dv.getUint8(6), locking = dv.getUint8(7);
-    const s = status & 8 ? "充電中" : status & 6 ? "喫煙中" : "待機";
-    return { status: s, locking };
+// ---------- 通知の解釈 ----------
+function statusText(v) {
+  if (v & 8) return "充電中";
+  if (v & 6) return "喫煙中";
+  return "待機";
+}
+function onNotify(dv) {
+  const bytes = [...new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength)];
+  dbg(bytes.map((b) => b.toString(16).padStart(2, "0")).join(" "));
+  const cmd = bytes[1];
+  if (cmd === 0x30 && bytes.length > 7) { devInfo.status = statusText(bytes[6]); devInfo.locking = bytes[7]; }
+  else if (cmd === 0x18 && bytes.length > 3) { devInfo.status = statusText(bytes[2]); devInfo.locking = bytes[3]; }
+  else if (cmd === 0x9f && bytes.length > 2) { devInfo.locking = bytes[2]; }
+  else return;
+  if (session) {
+    if (devInfo.status === "喫煙中") session.sawSmoking = true;
+    else if (session.sawSmoking) endSession("吸い終わりを検知したのでロックしました");
   }
-  if (cmd === "18" && dv.byteLength > 3) return { locking: dv.getUint8(3) };
-  if (cmd === "9F" && dv.byteLength > 2) return { locking: dv.getUint8(2) };
-  return null;
+  for (const w of waiters) w();
+  render();
 }
-const lockText = (v) => v === 17 ? "ロック中" : v === 1 ? "解錠中" : v === 0 ? "ロック機能OFF" : `不明(${v})`;
-let devInfo = {};
-function renderDevice() {
-  if (!device || !device.gatt.connected) { $("device").textContent = "未接続"; return; }
-  $("device").innerHTML =
-    `<b>${device.name}</b><br>状態: ${devInfo.status ?? "—"}　ロック: ${devInfo.locking != null ? lockText(devInfo.locking) : "—"}`;
+// 条件を満たす通知が来るまで待つ（来なければ false）
+function waitFor(pred, ms = 3000) {
+  if (pred()) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const w = () => { if (pred()) { waiters.delete(w); clearTimeout(t); resolve(true); } };
+    const t = setTimeout(() => { waiters.delete(w); resolve(false); }, ms);
+    waiters.add(w);
+  });
 }
 
-async function connect() {
-  if (!navigator.bluetooth) throw new Error("このブラウザは Bluetooth に対応していません（iPhone は Bluefy を使ってください）");
-  device = await step("機器選択", () => navigator.bluetooth.requestDevice({
-    filters: NAME_PREFIXES.map((p) => ({ namePrefix: p })),
-    optionalServices: [SVC],
-  }));
-  device.addEventListener("gattserverdisconnected", () => { render(); renderDevice(); });
-  const server = await step("接続", () => device.gatt.connect());
-  const svc = await step("サービス取得", () => server.getPrimaryService(SVC));
-  writeChar = await step("書込先取得", () => svc.getCharacteristic(WRITE));
-  const n = await step("通知先取得", () => svc.getCharacteristic(NOTIFY));
-  n.addEventListener("characteristicvaluechanged", (e) => {
-    const d = describe(e.target.value);
-    if (d) { Object.assign(devInfo, d); renderDevice(); }
-  });
-  await step("通知開始", () => n.startNotifications());
-  renderDevice(); render();
-}
-async function send(bytes) {
-  const buf = new Uint8Array(bytes);
-  await step("書き込み", () =>
-    writeChar.writeValueWithResponse ? writeChar.writeValueWithResponse(buf) : writeChar.writeValue(buf));
-}
-// どの段階で失敗したかを画面に出す（Bluefy はエラーが数字だけのことがある）
+// ---------- BLE ----------
 async function step(name, fn) {
   try { return await fn(); }
   catch (e) {
@@ -200,44 +222,123 @@ async function step(name, fn) {
     throw new Error(`${name}で失敗: ${detail}`);
   }
 }
-
-// 接続しただけで本体は解錠される。だから「まだ吸えない」ときは絶対に接続しない
-$("unlockBtn").onclick = async () => {
-  msg("");
-  if (nextAllowed() > Date.now()) return;
-  try {
-    if (!(device && device.gatt.connected)) await connect();
-    await send(CMD.unlock);
-    st.log.push(Date.now()); save(st); render();
-  } catch (e) { msg(e.message || String(e)); }
-};
-
-// 接続すると一瞬解錠されるが、すぐロックを送って切断する
-$("lockBtn").onclick = async () => {
-  msg("");
-  try {
-    if (!(device && device.gatt.connected)) await connect();
-    await send(CMD.lock);
-    setTimeout(() => device?.gatt.connected && device.gatt.disconnect(), 800);
-  } catch (e) { msg(e.message || String(e)); }
-};
-
-async function sendOnce(bytes) {
-  msg("");
-  try {
-    if (!(device && device.gatt.connected)) await connect();
-    await send(bytes);
-  } catch (e) { msg(e.message || String(e)); }
+// 接続しただけで本体は解錠される。呼ぶ側は「接続してよいか」を判断してから呼ぶこと
+async function connect() {
+  if (connected()) return;
+  if (!navigator.bluetooth) throw new Error("このブラウザは Bluetooth に対応していません（iPhone は Bluefy を使ってください）");
+  if (!device) {
+    device = await step("機器選択", () => navigator.bluetooth.requestDevice({
+      filters: NAME_PREFIXES.map((p) => ({ namePrefix: p })),
+      optionalServices: [SVC],
+    }));
+    device.addEventListener("gattserverdisconnected", () => { dbg("切断されました"); writeChar = null; render(); });
+  }
+  devInfo = {};
+  const server = await step("接続", () => device.gatt.connect());
+  const svc = await step("サービス取得", () => server.getPrimaryService(SVC));
+  writeChar = await step("書込先取得", () => svc.getCharacteristic(WRITE));
+  const n = await step("通知先取得", () => svc.getCharacteristic(NOTIFY));
+  n.addEventListener("characteristicvaluechanged", (e) => onNotify(e.target.value));
+  await step("通知開始", () => n.startNotifications());
+  await waitFor(() => devInfo.locking != null, 3000);
+  render();
 }
-$("funcOnBtn").onclick = () => sendOnce(CMD.lockFuncOn);
-$("funcOffBtn").onclick = () => sendOnce(CMD.lockFuncOff);
+async function send(bytes) {
+  const buf = new Uint8Array(bytes);
+  dbg(`送信 ${bytes.map((b) => b.toString(16).padStart(2, "0")).join(" ")}`);
+  await step("書き込み", () =>
+    writeChar.writeValueWithResponse ? writeChar.writeValueWithResponse(buf) : writeChar.writeValue(buf));
+}
+async function disconnect() {
+  if (connected()) device.gatt.disconnect();
+  render();
+}
+// 本体をロック状態にする。ロック機能がOFFならONにする（ONにした瞬間ロックされる）
+async function lockNow() {
+  await send(devInfo.locking === FUNC_OFF ? CMD.lockFuncOn : CMD.lock);
+  if (!(await waitFor(() => devInfo.locking === LOCKED))) throw new Error("ロックの確認が取れませんでした。もう一度押してください");
+}
 
-$("disconnectBtn").onclick =() => { device?.gatt.connected && device.gatt.disconnect(); };
+async function run(fn) {
+  if (busy) return;
+  busy = true; msg(""); render();
+  try { await fn(); }
+  catch (e) { msg(e.message || String(e)); dbg(`エラー ${e.message || e}`); }
+  finally { busy = false; render(); }
+}
+
+// ---------- 操作 ----------
+$("unlockBtn").onclick = () => run(async () => {
+  if (nextAllowed() > Date.now()) return; // まだ吸えないときは絶対に接続しない
+  msg("接続しています…", "info");
+  await connect();
+  if (devInfo.locking === FUNC_OFF) {
+    msg("本体のロック機能がOFFです。下の「ONにする」を先に押してください");
+    return;
+  }
+  await send(CMD.unlock);
+  if (!(await waitFor(() => devInfo.locking === UNLOCKED))) throw new Error("解錠の確認が取れませんでした");
+  st.log.push(Date.now()); save();
+  session = { start: Date.now(), sawSmoking: false };
+  session.timer = setTimeout(() => endSession("15分たったのでロックしました"), SESSION_MAX_MS);
+  msg("解錠しました。吸い終わるまでこの画面を開いたままにしてください", "ok");
+});
+
+async function endSession(reason) {
+  if (!session) return;
+  clearTimeout(session.timer);
+  session = null;
+  while (busy) await new Promise((r) => setTimeout(r, 100));
+  await run(async () => {
+    if (!connected()) { msg("接続が切れていました。念のため「今すぐロック」を押してください"); return; }
+    await lockNow();
+    await disconnect();
+    msg(reason, "ok");
+  });
+}
+
+$("lockBtn").onclick = () => {
+  if (session) return endSession("ロックしました");
+  run(async () => {
+    msg("接続しています…", "info");
+    await connect();
+    await lockNow();
+    await disconnect();
+    msg("ロックしました", "ok");
+  });
+};
+
+$("funcOnBtn").onclick = () => run(async () => {
+  await connect();
+  await send(CMD.lockFuncOn);
+  if (!(await waitFor(() => devInfo.locking === LOCKED))) throw new Error("ONの確認が取れませんでした");
+  await disconnect();
+  msg("ロック機能をONにしました（いまロック中です）", "ok");
+});
+
+$("funcOffBtn").onclick = () => run(async () => {
+  if (!confirm("ロック機能をOFFにすると、いつでも吸える状態になります。OFFにしますか？")) return;
+  await connect();
+  await send(CMD.lockFuncOff);
+  if (!(await waitFor(() => devInfo.locking === FUNC_OFF))) throw new Error("OFFの確認が取れませんでした");
+  await disconnect();
+  msg("ロック機能をOFFにしました", "ok");
+});
+
+$("disconnectBtn").onclick = () => {
+  if (session) return endSession("ロックしました");
+  disconnect();
+};
+
+$("undoBtn").onclick = () => {
+  if (!st.log.length || !confirm(`${fmtTime(lastUnlock())} の記録を取り消しますか？`)) return;
+  st.log.pop(); save(); render();
+};
 
 $("interval").value = st.intervalMin;
 $("interval").onchange = (e) => {
   const v = Math.max(1, Math.min(600, parseInt(e.target.value, 10) || 60));
-  st.intervalMin = v; e.target.value = v; save(st); render();
+  st.intervalMin = v; e.target.value = v; save(); render();
 };
 
 render();
