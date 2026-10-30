@@ -72,6 +72,14 @@
   </section>
 
   <section class="card">
+    <div class="muted" style="font-size:13px;margin-bottom:10px">本体のロック機能（最初に一度だけ）</div>
+    <div class="row">
+      <button class="secondary" id="funcOnBtn">ONにする</button>
+      <button class="secondary" id="funcOffBtn">OFFにする</button>
+    </div>
+  </section>
+
+  <section class="card">
     <div class="muted" style="font-size:13px;margin-bottom:6px">解錠ログ</div>
     <div class="log" id="log"></div>
   </section>
@@ -82,7 +90,13 @@ const NAME_PREFIXES = ["Ploom X", "Ploom AURA", "Ploom aura", "Ploom cube"];
 const SVC = "53654010-a391-4a65-83fa-bc58084aca28";
 const WRITE = "53654011-a391-4a65-83fa-bc58084aca28";
 const NOTIFY = "53654012-a391-4a65-83fa-bc58084aca28";
-const CMD = { lock: [2, 0x9e, 1], unlock: [2, 0x9e, 0] };
+const CMD = {
+  lock: [2, 0x9e, 1],
+  unlock: [2, 0x9e, 0],
+  // ロック機能そのものの ON/OFF。後ろ10バイトは手動解除パターン（公式の既定値）
+  lockFuncOn: [12, 0xa0, 1, 1, 2, 3, 1, 2, 3, 0, 0, 0, 0],
+  lockFuncOff: [12, 0xa0, 0, 1, 2, 3, 1, 2, 3, 0, 0, 0, 0],
+};
 const STORE = "ploomGate.v1";
 
 // 状態はこの端末のブラウザにだけ保存する（消えても致命的ではない）
@@ -208,7 +222,17 @@ $("lockBtn").onclick = async () => {
   } catch (e) { msg(e.message || String(e)); }
 };
 
-$("disconnectBtn").onclick = () => { device?.gatt.connected && device.gatt.disconnect(); };
+async function sendOnce(bytes) {
+  msg("");
+  try {
+    if (!(device && device.gatt.connected)) await connect();
+    await send(bytes);
+  } catch (e) { msg(e.message || String(e)); }
+}
+$("funcOnBtn").onclick = () => sendOnce(CMD.lockFuncOn);
+$("funcOffBtn").onclick = () => sendOnce(CMD.lockFuncOff);
+
+$("disconnectBtn").onclick =() => { device?.gatt.connected && device.gatt.disconnect(); };
 
 $("interval").value = st.intervalMin;
 $("interval").onchange = (e) => {
