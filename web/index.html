@@ -157,26 +157,34 @@ function renderDevice() {
 
 async function connect() {
   if (!navigator.bluetooth) throw new Error("このブラウザは Bluetooth に対応していません（iPhone は Bluefy を使ってください）");
-  device = await navigator.bluetooth.requestDevice({
+  device = await step("機器選択", () => navigator.bluetooth.requestDevice({
     filters: NAME_PREFIXES.map((p) => ({ namePrefix: p })),
-    optionalServices: [SVC, 0x180a],
-  });
+    optionalServices: [SVC],
+  }));
   device.addEventListener("gattserverdisconnected", () => { render(); renderDevice(); });
-  const server = await device.gatt.connect();
-  const svc = await server.getPrimaryService(SVC);
-  writeChar = await svc.getCharacteristic(WRITE);
-  const n = await svc.getCharacteristic(NOTIFY);
+  const server = await step("接続", () => device.gatt.connect());
+  const svc = await step("サービス取得", () => server.getPrimaryService(SVC));
+  writeChar = await step("書込先取得", () => svc.getCharacteristic(WRITE));
+  const n = await step("通知先取得", () => svc.getCharacteristic(NOTIFY));
   n.addEventListener("characteristicvaluechanged", (e) => {
     const d = describe(e.target.value);
     if (d) { Object.assign(devInfo, d); renderDevice(); }
   });
-  await n.startNotifications();
+  await step("通知開始", () => n.startNotifications());
   renderDevice(); render();
 }
 async function send(bytes) {
   const buf = new Uint8Array(bytes);
-  if (writeChar.writeValueWithResponse) await writeChar.writeValueWithResponse(buf);
-  else await writeChar.writeValue(buf);
+  await step("書き込み", () =>
+    writeChar.writeValueWithResponse ? writeChar.writeValueWithResponse(buf) : writeChar.writeValue(buf));
+}
+// どの段階で失敗したかを画面に出す（Bluefy はエラーが数字だけのことがある）
+async function step(name, fn) {
+  try { return await fn(); }
+  catch (e) {
+    const detail = [e?.name, e?.message, e?.code].filter((x) => x != null && x !== "").join(" / ") || String(e);
+    throw new Error(`${name}で失敗: ${detail}`);
+  }
 }
 
 // 接続しただけで本体は解錠される。だから「まだ吸えない」ときは絶対に接続しない
