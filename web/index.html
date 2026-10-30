@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111214">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Ploom Gate</title>
+<style>
+  :root {
+    --bg: #111214; --card: #1b1d21; --line: #2a2d33; --text: #eceef1; --sub: #9aa0a8;
+    --ok: #4cc38a; --wait: #e5a54b; --accent: #5b8cff; --danger: #e5604b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg: #f4f5f7; --card: #ffffff; --line: #e2e4e8; --text: #16181c; --sub: #5f6670;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+  }
+  main { max-width: 440px; margin: 0 auto; display: grid; gap: 14px; }
+  h1 { font-size: 15px; font-weight: 600; color: var(--sub); margin: 4px 0 0; letter-spacing: .04em; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 18px; }
+  .state { text-align: center; padding: 28px 18px; }
+  .state .label { font-size: 13px; color: var(--sub); }
+  .state .big { font-size: 56px; font-weight: 700; font-variant-numeric: tabular-nums; margin: 6px 0; }
+  .state .note { font-size: 13px; color: var(--sub); min-height: 1.4em; }
+  .ready .big { color: var(--ok); }
+  .waiting .big { color: var(--wait); }
+  button {
+    width: 100%; border: 0; border-radius: 14px; padding: 18px; font-size: 18px; font-weight: 700;
+    background: var(--accent); color: #fff; cursor: pointer;
+  }
+  button:disabled { opacity: .35; cursor: not-allowed; }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--line); font-size: 15px; padding: 14px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  #device { font-size: 13px; color: var(--sub); line-height: 1.6; }
+  #device b { color: var(--text); font-weight: 600; }
+  .log { font-size: 13px; line-height: 1.8; font-variant-numeric: tabular-nums; max-height: 220px; overflow: auto; }
+  .log div { display: flex; justify-content: space-between; border-bottom: 1px solid var(--line); }
+  .muted { color: var(--sub); }
+  label.setting { display: flex; align-items: center; justify-content: space-between; font-size: 14px; }
+  label.setting input { width: 80px; font-size: 16px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--text); text-align: right; }
+  #msg { font-size: 13px; color: var(--danger); min-height: 1.2em; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <h1>PLOOM GATE</h1>
+
+  <section class="card state" id="stateCard">
+    <div class="label" id="stateLabel">—</div>
+    <div class="big" id="stateBig">—</div>
+    <div class="note" id="stateNote"></div>
+  </section>
+
+  <button id="unlockBtn">吸う（解錠する）</button>
+  <div class="row">
+    <button class="secondary" id="lockBtn">今すぐロック</button>
+    <button class="secondary" id="disconnectBtn" disabled>切断</button>
+  </div>
+  <div id="msg"></div>
+
+  <section class="card" id="device">未接続</section>
+
+  <section class="card">
+    <label class="setting">次に吸えるまで（分）<input id="interval" type="number" min="1" max="600" inputmode="numeric"></label>
+  </section>
+
+  <section class="card">
+    <div class="muted" style="font-size:13px;margin-bottom:6px">解錠ログ</div>
+    <div class="log" id="log"></div>
+  </section>
+</main>
+
+<script>
+const NAME_PREFIXES = ["Ploom X", "Ploom AURA", "Ploom aura", "Ploom cube"];
+const SVC = "53654010-a391-4a65-83fa-bc58084aca28";
+const WRITE = "53654011-a391-4a65-83fa-bc58084aca28";
+const NOTIFY = "53654012-a391-4a65-83fa-bc58084aca28";
+const CMD = { lock: [2, 0x9e, 1], unlock: [2, 0x9e, 0] };
+const STORE = "ploomGate.v1";
+
+// 状態はこの端末のブラウザにだけ保存する（消えても致命的ではない）
+function load() {
+  try { return JSON.parse(localStorage.getItem(STORE)) || {}; } catch { return {}; }
+}
+function save(s) {
+  try { localStorage.setItem(STORE, JSON.stringify(s)); } catch {}
+}
+let st = Object.assign({ intervalMin: 60, log: [] }, load());
+
+let device = null, writeChar = null;
+const $ = (id) => document.getElementById(id);
+
+function lastUnlock() { return st.log.length ? st.log[st.log.length - 1] : null; }
+function nextAllowed() {
+  const last = lastUnlock();
+  return last ? last + st.intervalMin * 60000 : 0;
+}
+function fmtTime(t) {
+  return new Date(t).toLocaleString("ja-JP", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+function fmtLeft(ms) {
+  const s = Math.ceil(ms / 1000), m = Math.floor(s / 60), r = s % 60;
+  return `${m}:${String(r).padStart(2, "0")}`;
+}
+function msg(t) { $("msg").textContent = t || ""; }
+
+function render() {
+  const left = nextAllowed() - Date.now();
+  const card = $("stateCard");
+  if (left > 0) {
+    card.className = "card state waiting";
+    $("stateLabel").textContent = "次に吸えるまで";
+    $("stateBig").textContent = fmtLeft(left);
+    $("stateNote").textContent = `${fmtTime(nextAllowed())} から`;
+    $("unlockBtn").disabled = true;
+  } else {
+    card.className = "card state ready";
+    $("stateLabel").textContent = "いま";
+    $("stateBig").textContent = "OK";
+    const last = lastUnlock();
+    $("stateNote").textContent = last ? `前回 ${fmtTime(last)}` : "まだ記録なし";
+    $("unlockBtn").disabled = false;
+  }
+  $("disconnectBtn").disabled = !(device && device.gatt.connected);
+  $("log").innerHTML = st.log.slice().reverse().slice(0, 50).map((t, i, a) => {
+    const prev = a[i + 1];
+    const gap = prev ? `${Math.round((t - prev) / 60000)}分後` : "";
+    return `<div><span>${fmtTime(t)}</span><span class="muted">${gap}</span></div>`;
+  }).join("") || '<span class="muted">なし</span>';
+}
+
+function describe(dv) {
+  const cmd = dv.getUint8(1).toString(16).toUpperCase().padStart(2, "0");
+  if (cmd === "30" && dv.byteLength > 7) {
+    const status = dv.getUint8(6), locking = dv.getUint8(7);
+    const s = status & 8 ? "充電中" : status & 6 ? "喫煙中" : "待機";
+    return { status: s, locking };
+  }
+  if (cmd === "18" && dv.byteLength > 3) return { locking: dv.getUint8(3) };
+  if (cmd === "9F" && dv.byteLength > 2) return { locking: dv.getUint8(2) };
+  return null;
+}
+const lockText = (v) => v === 17 ? "ロック中" : v === 1 ? "解錠中" : v === 0 ? "ロック機能OFF" : `不明(${v})`;
+let devInfo = {};
+function renderDevice() {
+  if (!device || !device.gatt.connected) { $("device").textContent = "未接続"; return; }
+  $("device").innerHTML =
+    `<b>${device.name}</b><br>状態: ${devInfo.status ?? "—"}　ロック: ${devInfo.locking != null ? lockText(devInfo.locking) : "—"}`;
+}
+
+async function connect() {
+  if (!navigator.bluetooth) throw new Error("このブラウザは Bluetooth に対応していません（iPhone は Bluefy を使ってください）");
+  device = await navigator.bluetooth.requestDevice({
+    filters: NAME_PREFIXES.map((p) => ({ namePrefix: p })),
+    optionalServices: [SVC, 0x180a],
+  });
+  device.addEventListener("gattserverdisconnected", () => { render(); renderDevice(); });
+  const server = await device.gatt.connect();
+  const svc = await server.getPrimaryService(SVC);
+  writeChar = await svc.getCharacteristic(WRITE);
+  const n = await svc.getCharacteristic(NOTIFY);
+  n.addEventListener("characteristicvaluechanged", (e) => {
+    const d = describe(e.target.value);
+    if (d) { Object.assign(devInfo, d); renderDevice(); }
+  });
+  await n.startNotifications();
+  renderDevice(); render();
+}
+async function send(bytes) {
+  const buf = new Uint8Array(bytes);
+  if (writeChar.writeValueWithResponse) await writeChar.writeValueWithResponse(buf);
+  else await writeChar.writeValue(buf);
+}
+
+// 接続しただけで本体は解錠される。だから「まだ吸えない」ときは絶対に接続しない
+$("unlockBtn").onclick = async () => {
+  msg("");
+  if (nextAllowed() > Date.now()) return;
+  try {
+    if (!(device && device.gatt.connected)) await connect();
+    await send(CMD.unlock);
+    st.log.push(Date.now()); save(st); render();
+  } catch (e) { msg(e.message || String(e)); }
+};
+
+// 接続すると一瞬解錠されるが、すぐロックを送って切断する
+$("lockBtn").onclick = async () => {
+  msg("");
+  try {
+    if (!(device && device.gatt.connected)) await connect();
+    await send(CMD.lock);
+    setTimeout(() => device?.gatt.connected && device.gatt.disconnect(), 800);
+  } catch (e) { msg(e.message || String(e)); }
+};
+
+$("disconnectBtn").onclick = () => { device?.gatt.connected && device.gatt.disconnect(); };
+
+$("interval").value = st.intervalMin;
+$("interval").onchange = (e) => {
+  const v = Math.max(1, Math.min(600, parseInt(e.target.value, 10) || 60));
+  st.intervalMin = v; e.target.value = v; save(st); render();
+};
+
+render();
+setInterval(render, 1000);
+</script>
+</body>
+</html>
